@@ -1,12 +1,13 @@
-<script setup>
-import { ref, computed, reactive} from 'vue';
-import { allHash } from '@shell/utils/promise';
-import { _EDIT, _CREATE } from '@shell/config/query-params';
-import { useStore } from 'vuex';
+<script lang='ts'>
+import { defineComponent } from 'vue';
+import { mapGetters } from 'vuex';
+import CreateEditView from '@shell/mixins/create-edit-view';
+import { clear } from '@shell/utils/array';
 import { NAMESPACE, SECRET } from '@shell/config/types';
 import CruResource from '@shell/components/CruResource.vue';
 import Loading from '@shell/components/Loading.vue';
 import SelectCredential from '@shell/edit/provisioning.cattle.io.cluster/SelectCredential.vue';
+import FormValidation from '@shell/mixins/form-validation';
 import Checkbox from '@components/Form/Checkbox/Checkbox.vue';
 import { randomStr } from '@shell/utils/string';
 import { clone, set } from '@shell/utils/object';
@@ -15,25 +16,11 @@ import KeyValue from '@shell/components/form/KeyValue.vue';
 import LabeledInput from '@components/Form/LabeledInput/LabeledInput.vue';
 import LabeledSelect from '@shell/components/form/LabeledSelect.vue';
 import Banner from '@components/Banner/Banner.vue';
-import { PROVIDER_TYPES, RANCHER_TURTLES_SYSTEM_NAMESPACE, RANCHER_TURTLES_SYSTEM_NAME } from '../../types/capi';
-import { useI18n } from '@shell/composables/useI18n';
+import { _EDIT, _CREATE } from '@shell/config/query-params';
+import { allHash } from '@shell/utils/promise';
+import { PROVIDER_TYPES, RANCHER_TURTLES_SYSTEM_NAMESPACE, RANCHER_TURTLES_SYSTEM_NAME, Provider } from '../../types/capi';
+import { providerNameValidator, providerVersionValidator, urlValidator } from '../../util/validators';
 
-const emit = defineEmits(['update:value']);
-const props = defineProps({
-    mode: {
-      type:     String,
-      required: true,
-    },
-    value: {
-      type:     Object,
-      required: true,
-    },
-    provider: {
-      type:     String,
-      required: true,
-    }
-});
-const providerTypes = ['infrastructure', 'bootstrap', 'controlPlane', 'addon', 'ipam', 'runtimeextension', 'core'];
 const defaultFeatures = {
   clusterResourceSet: true,
   clusterTopology:    true,
@@ -54,46 +41,134 @@ const customProviderSpec = {
   fetchConfig:  { url: '' },
   version:      ''
 };
-const store = useStore();
-const { t } = useI18n(store);
-const providerDetails = PROVIDER_TYPES.find(p => p.id === props.provider) || { disabled: false, id: '0' };
-const credentialComponent = providerDetails?.credential;
 
-const isEdit = props.mode === _EDIT;
-const isCustom = props.provider === 'custom';
-const localValue = reactive(props.value);
+const providerTypes = ['infrastructure', 'bootstrap', 'controlPlane', 'addon', 'ipam', 'runtimeextension', 'core'];
 
-
-const cru = ref(null);
-const loading = ref(true);
-const allNamespaces = ref([]);
-const coreProviderSecret = ref({});
-
-async function getDependencies() {
-    const inStore = store.getters['currentStore'](NAMESPACE);
-    const hashPromises = {
-        namespaces:         store.dispatch(`${ inStore }/findAll`, { type: NAMESPACE }),
-        coreProviderSecret: store.dispatch(`management/find`, {
-          type: SECRET, id: `${ RANCHER_TURTLES_SYSTEM_NAMESPACE }/${ RANCHER_TURTLES_SYSTEM_NAME }`, opt: { watch: false, force: true }
-        } )
-      };
-
-    return await allHash(hashPromises);
-};
-
-function cancelCredential() {
-    if ( cru && cru.value ) {
-        cru.value.emitOrRoute();
-    }
+interface Secret {
+  metadata: {
+    name: string,
+    namespace: string
+  }
 }
-function generateName(name) {
-    return name ? `${ name }-credentials-${ randomStr(5).toLowerCase() }` : undefined;
-};
+interface Hash {
+  namespaces: [],
+  coreProviderSecret: Secret[]
+}
 
-function getSpecFromCoreSecret() {
-    const coreProviderSecretData = coreProviderSecret?.data;
+export default defineComponent({
+    name: 'ProviderConfig',
+  components: {
+    CruResource,
+    Loading,
+    NameNsDescription,
+    SelectCredential,
+    Checkbox,
+    KeyValue,
+    LabeledInput,
+    LabeledSelect,
+    Banner
+  },
+  mixins: [CreateEditView, FormValidation],
+  emits:['update:value'],
+  props:      {
+    mode: {
+      type:     String,
+      required: true,
+    },
+    value: {
+      type:     Object,
+      required: true,
+    },
+    provider: {
+      type:     String,
+      required: true,
+    }
+  },
+  beforeMount() {
+    this.getDependencies().then((hash: Hash) => {
+      this.allNamespaces = hash.namespaces || [];
+      this.coreProviderSecret = hash.coreProviderSecret || {};
+      this.initSpecs();
+      this.loading = false;
+    }).catch((err: Error) => {
+      this.errors.push(err);
+      this.initSpecs();
+      this.loading = false;
+    });
+  },
+  data() {
+    const providerDetails: Provider = PROVIDER_TYPES.find(p => p.id === this.provider) || { disabled: false, id: '0' };
 
-    if (coreProviderSecretData) {
+    return {
+      loading:            true,
+      fvFormRuleSets:          [
+        { path: 'metadata.name', rules: ['name'] },
+        { path: 'spec.name', rules: ['required'] },
+        { path: 'spec.version', rules: ['version'] },
+        { path: 'spec.fetchConfig.url', rules: ['url'] },
+      ],
+      allNamespaces:         [],
+      credentialComponent:     providerDetails?.credential,
+
+    };
+  },
+  computed: {
+    ...mapGetters(['namespaces']),
+    fvExtraRules() {
+      return {
+        name:    providerNameValidator(this.$store.getters['i18n/t']),
+        version: providerVersionValidator(this.$store.getters['i18n/t'], this.isCustom),
+        url:     urlValidator(this.$store.getters['i18n/t'])
+      };
+    },
+    typeOptions() {
+      return providerTypes.map((type) => {
+        return { label: this.t(`capi.provider.type.${ type }.label`), value: type };
+      });
+    },
+    showForm() {
+      return !!this.value.spec.credentials.rancherCloudCredentialNamespaceName || !this.credentialComponent;
+    },
+
+    isEdit() {
+      return this.mode === _EDIT;
+    },
+    hasFeatures() {
+      return !!this.value?.spec?.features;
+    },
+    hasVariables() {
+      return !!this.value?.spec?.variables;
+    },
+    isCustom() {
+      return this.provider === 'custom';
+    },
+    shouldShowBanner() {
+      return this.isEdit && (this.hasFeatures || this.hasVariables);
+    },
+    waitingForCredential() {
+      return this.credentialComponent && !this.value.spec.credentials.rancherCloudCredentialNamespaceName;
+    }
+  },
+  methods:  {
+    initSpecs() {
+      if ( !this.value.spec ) {
+        const defaultsFromCoreProvider = this.getSpecFromCoreSecret();
+
+        if ( this.provider !== 'custom') {
+          set(this.value, 'spec', { ...clone(defaultSpec), ...defaultsFromCoreProvider });
+          set(this.value.spec, 'name', this.provider); // Defines the provider kind to provision.
+        } else {
+          set(this.value, 'spec', { ...clone(customProviderSpec), ...defaultsFromCoreProvider });
+        }
+      }
+      if (!this.value.spec.configSecret.name) {
+        set(this.value.spec.configSecret, 'name', this.generateName(this.provider)); // Defines the name of the secret that will be created or adjusted based on the content of the spec.features and spec.variables.
+      }
+    },
+    getSpecFromCoreSecret() {
+      const coreProviderSecretData = this.coreProviderSecret?.data;
+
+      if (coreProviderSecretData) {
         const FEATURES_KEYS = ['EXP_CLUSTER_RESOURCE_SET', 'CLUSTER_TOPOLOGY', 'EXP_MACHINE_POOL'];
 
         const variables = clone(coreProviderSecretData);
@@ -112,129 +187,60 @@ function getSpecFromCoreSecret() {
         };
       }
 
-    return {
+      return {
         features:  clone(defaultFeatures),
         variables: clone(defaultVariables)
-    };
-};
-
-function initSpecs() {
-    if ( !localValue.spec ) {
-        const defaultsFromCoreProvider = getSpecFromCoreSecret();
-
-        if ( props.provider !== 'custom') {
-          set(localValue, 'spec', { ...clone(defaultSpec), ...defaultsFromCoreProvider });
-          set(localValue.spec, 'name', props.provider); // Defines the provider kind to provision.
-        } else {
-          set(localValue, 'spec', { ...clone(customProviderSpec), ...defaultsFromCoreProvider });
-        }
-    }
-    if (!localValue.spec.configSecret.name) {
-        set(localValue.spec.configSecret, 'name', generateName(props.provider)); // Defines the name of the secret that will be created or adjusted based on the content of the spec.features and spec.variables.
-    }
-};
-
-const typeOptions = computed(() => {
-    return providerTypes.map((type) => {
-        return { label: t(`capi.provider.type.${ type }.label`), value: type }; 
-      });
-});
-
-
-getDependencies().then((hash) => {
-      allNamespaces.value = hash.namespaces || [];
-      coreProviderSecret.value = hash.coreProviderSecret || {};
-      initSpecs();
-      loading.value = false;
-    }).catch((err) => {
-      //errors.push(err);
-      initSpecs();
-      loading.value = false;
-    });
-
-const showForm = computed(() => {return !!localValue.spec.credentials.rancherCloudCredentialNamespaceName || !credentialComponent });
-const hasFeatures = computed(() => { return !!localValue?.spec?.features});
-const hasVariables = computed(() => { return !!localValue?.spec?.variables});
-const shouldShowBanner = computed(() => { return isEdit && (hasFeatures || hasVariables)}); 
-const waitingForCredential = computed(() => { return credentialComponent && !localValue.spec.credentials.rancherCloudCredentialNamespaceName});
-
-</script>
-
-<script>
-  import { defineComponent } from "vue"; 
-  import { mapGetters } from 'vuex';
-  import CreateEditView from '@shell/mixins/create-edit-view';
-  import FormValidation from '@shell/mixins/form-validation';
-  import { clear } from '@shell/utils/array';
-  import { providerNameValidator, providerVersionValidator, urlValidator } from '../../util/validators';
-
-  export default defineComponent({
-    mixins: [CreateEditView, FormValidation],
-    props:      {
-    mode: {
-      type:     String,
-      required: true,
-    },
-    value: {
-      type:     Object,
-      required: true,
-    },
-    provider: {
-      type:     String,
-      required: true,
-    }
-  },
-    data() {
-        return {
-            fvFormRuleSets:          [
-                { path: 'metadata.name', rules: ['name'] },
-                { path: 'spec.name', rules: ['required'] },
-                { path: 'spec.version', rules: ['version'] },
-                { path: 'spec.fetchConfig.url', rules: ['url'] },
-            ],
-        }
-    },
-    computed: {
-    ...mapGetters(['namespaces']),
-    isCustomProvider() {
-      return this.provider === 'custom';
-    },
-    fvExtraRules() {
-      return {
-        name:    providerNameValidator(this.$store.getters['i18n/t']),
-        version: providerVersionValidator(this.$store.getters['i18n/t'], this.isCustomProvider),
-        url:     urlValidator(this.$store.getters['i18n/t'])
       };
-    }},
-    methods:  {
-        async saveOverride(btnCb) {
+    },
+    generateName(name: string) {
+      return name ? `${ name }-credentials-${ randomStr(5).toLowerCase() }` : undefined;
+    },
+    async getDependencies() {
+      const inStore = this.$store.getters['currentStore'](NAMESPACE);
+      const { $store } = this;
+      const hashPromises = {
+        namespaces:         $store.dispatch(`${ inStore }/findAll`, { type: NAMESPACE }),
+        coreProviderSecret: $store.dispatch(`management/find`, {
+          type: SECRET, id: `${ RANCHER_TURTLES_SYSTEM_NAMESPACE }/${ RANCHER_TURTLES_SYSTEM_NAME }`, opt: { watch: false, force: true }
+        } )
+      };
 
-            if ( this.errors ) {
-                clear(this.errors);
-            }
-            if ( !this.credentialComponent && !this.value.spec?.credentials?.rancherCloudCredentialNamespaceName ) {
-                this.value.spec.credentials = null;
-            }
-            try {
-                await this.save(btnCb, null);
-            } catch (err) {
-                this.errors.push(err);
-                btnCb(false);
-            }
-        }
+      return await allHash(hashPromises);
+    },
+
+    async saveOverride(btnCb: Function) {
+
+      if ( this.errors ) {
+        clear(this.errors);
+      }
+      if ( !this.credentialComponent && !this.value.spec?.credentials?.rancherCloudCredentialNamespaceName ) {
+        this.value.spec.credentials = null;
+      }
+      try {
+        await this.save(btnCb, null);
+      } catch (err) {
+        this.errors.push(err);
+        btnCb(false);
+      }
+    },
+    cancelCredential() {
+      if ( this.$refs.providercruresource ) {
+        this.$refs.providercruresource.emitOrRoute();
+      }
     }
-  });
+  }
+});
 </script>
 
 <template>
   <Loading v-if="loading" />
   <CruResource
     v-else
-    ref="cru"
+    ref="providercruresource"
     :can-yaml="false"
     :mode="mode"
     :validation-passed="fvFormIsValid"
-    :resource="localValue"
+    :resource="value"
     :errors="fvUnreportedValidationErrors"
     :cancel-event="true"
     :done-route="doneRoute"
@@ -247,7 +253,7 @@ const waitingForCredential = computed(() => { return credentialComponent && !loc
     @error="e=>errors=e"
   >
     <NameNsDescription
-      v-model:value="localValue"
+      :value="value"
       :mode="mode"
       :namespaced="true"
       :namespace-options="allNamespaces"
@@ -265,7 +271,7 @@ const waitingForCredential = computed(() => { return credentialComponent && !loc
           class="col span-3"
         >
           <LabeledInput
-            :value="localValue.spec.name"
+            :value="value.spec.name"
             :mode="mode"
             label-key="capi.provider.label"
             placeholder-key="capi.provider.placeholder"
@@ -278,7 +284,7 @@ const waitingForCredential = computed(() => { return credentialComponent && !loc
           class="col span-3"
         >
           <LabeledSelect
-            v-model:value="localValue.spec.type"
+            :value="value.spec.type"
             :mode="mode"
             :options="typeOptions"
             label-key="capi.provider.type.label"
@@ -291,7 +297,7 @@ const waitingForCredential = computed(() => { return credentialComponent && !loc
           class="col span-3"
         >
           <LabeledInput
-            v-model:value="localValue.spec.version"
+            :value="value.spec.version"
             :mode="mode"
             label-key="capi.provider.version.label"
             placeholder-key="capi.provider.version.placeholder"
@@ -306,7 +312,7 @@ const waitingForCredential = computed(() => { return credentialComponent && !loc
           class="col span-6"
         >
           <LabeledInput
-            v-model:value="localValue.spec.fetchConfig.url"
+            :value="value.spec.fetchConfig.url"
             :mode="mode"
             label-key="capi.provider.fetchConfigURL.label"
             placeholder-key="capi.provider.fetchConfigURL.placeholder"
@@ -316,16 +322,16 @@ const waitingForCredential = computed(() => { return credentialComponent && !loc
         </div>
       </div>
     </div>
-    
     <div v-if="credentialComponent" class="mb-40" />
     <h2 v-if="hasFeatures || hasVariables" class="mb-20">
-        {{ t('capi.provider.secret.title') }}
+      <t k="capi.provider.secret.title" />
     </h2>
     <div v-if="credentialComponent">
-        <h3 class="mb-20">{{ t('capi.provider.cloudCredential.title') }}</h3> 
-     
+      <h3 class="mb-20">
+        <t k="capi.provider.cloudCredential.title" />
+      </h3>
       <SelectCredential
-        :value="localValue.spec.credentials.rancherCloudCredentialNamespaceName"
+        v-model:value="value.spec.credentials.rancherCloudCredentialNamespaceName"
         :mode="mode"
         :provider="credentialComponent"
         :cancel="cancelCredential"
@@ -342,31 +348,34 @@ const waitingForCredential = computed(() => { return credentialComponent && !loc
         {{ t('capi.provider.banner') }}
       </Banner>
       <div v-if="hasFeatures" class="mb-40">
-        <h3 class="mb-20">{{ t('capi.provider.features.title') }}</h3> 
+        <h3 class="mb-20">
+          <t k="capi.provider.features.title" />
+        </h3>
         <Checkbox
-          :value="localValue.spec.features.clusterResourceSet"
+          :value="value.spec.features.clusterResourceSet"
           :mode="mode"
           :label="t('capi.provider.features.clusterResourceSet')"
           @update:value="$emit('update:value', {k: 'spec.features.clusterResourceSet', val: $event})"
         />
         <Checkbox
-          v-model:value="localValue.spec.features.clusterTopology"
+          v-model:value="value.spec.features.clusterTopology"
           :mode="mode"
           :label="t('capi.provider.features.clusterTopology')"
           @update:value="$emit('update:value', {k: 'spec.features.clusterTopology', val: $event})"
         />
         <Checkbox
-          v-model:value="localValue.spec.features.machinePool"
+          v-model:value="value.spec.features.machinePool"
           :mode="mode"
           :label="t('capi.provider.features.machinePool')"
           @update:value="$emit('update:value', {k: 'spec.features.machinePool', val: $event})"
         />
       </div>
       <div v-if="hasVariables">
-        
-        <h3>{{ t('capi.provider.variables.title') }}</h3>        
+        <h3>
+          <t k="capi.provider.variables.title" />
+        </h3>
         <KeyValue
-          v-model:value="localValue.spec.variables"
+          :value="value.spec.variables"
           :add-label="t('capi.provider.variables.add')"
           :mode="mode"
           :value-can-be-empty="true"

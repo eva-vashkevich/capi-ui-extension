@@ -1,123 +1,90 @@
-<script lang="ts">
-import { defineComponent } from 'vue';
-import CreateEditView from '@shell/mixins/create-edit-view';
-import CruResource from '@shell/components/CruResource.vue';
-import SelectIconGrid from '@shell/components/SelectIconGrid.vue';
-import { SUB_TYPE } from '@shell/config/query-params';
-import { PROVIDER_TYPES } from '../../types/capi';
-import ProviderConfig from './ProviderConfig.vue';
-import { set } from '@shell/utils/object';
+<script setup>
+    import { ref, computed } from 'vue';
+    import CruResource from '@shell/components/CruResource.vue';
+    import SelectIconGrid from '@shell/components/SelectIconGrid.vue';
+    import { PROVIDER_TYPES } from '../../types/capi.ts';
+    import { SUB_TYPE } from '@shell/config/query-params';
+    import { useRouter, useRoute } from 'vue-router';
+    import { useStore } from 'vuex';
+    import ProviderConfig from './ProviderConfig.vue';
+    import { set } from '@shell/utils/object';
 
-interface ProviderType {
-  id: string,
-  label: string,
-  description: string,
-  icon: HTMLImageElement
-  disabled: boolean,
-}
-type Route = {
-  query: {[index: string]:any},
-};
+    const emit = defineEmits(['set-subtype']);
+    const props = defineProps({
+        value: {
+            type:    Object,
+            default: null,
+        },
+    });
+    
+    const router = useRouter();
+    const location = useRoute();
+    const store = useStore();
 
-export default defineComponent({
-  name: 'CreateProvider',
+    const subType = ref(location?.query[SUB_TYPE] || null);
 
-  components: {
-    CruResource,
-    SelectIconGrid,
-    ProviderConfig
-  },
+    function selectType(type) {
+      subType.value = type;
+      emit('set-subtype', store.getters['i18n/withFallback'](`cluster.provider."${ type }"`, null, type));
+    };
 
-  mixins: [CreateEditView],
-  emits:['set-subtype', 'update:value'],
-
-  props: {
-
-    value: {
-      type:    Object,
-      default: null,
-    },
-
-    /**
-     * Inherited global identifier prefix for tests
-     * Define a term based on the parent component to avoid conflicts on multiple components
-     */
-    componentTestid: {
-      type:    String,
-      default: 'capi-provider-create'
+    if ( props.value?.spec?.name) {
+      selectType(props.value.spec.name);
     }
-  },
-  beforeMount() {
-    if ( this.value?.spec?.name) {
-      this.selectType(this.value.spec.name);
-    }
-  },
+    
+    const subTypes = computed(() => {
+        const out = [];
+        const getters = store.getters;
 
-  data() {
-    const route = this.$route as Route;
-    const subType: string | null = route?.query[SUB_TYPE] || null;
+        PROVIDER_TYPES?.forEach((provider) => {
+            const id = provider.id;
+            const disabled = provider.disabled;
+            const label = getters['i18n/withFallback'](`cluster.provider."${ id }"`, null, id);
+            const description = getters['i18n/withFallback'](`cluster.providerDescription."${ id }"`, null, '');
+            let icon;
 
-    return { subType };
-  },
+            try {
+            icon = require(`~shell/assets/images/providers/${ id }.svg`);
+            } catch (e) {
+            try {
+                icon = require(`../../assets/images/providers/${ id }.svg`);
+            } catch (e) {
+                icon = require('~shell/assets/images/generic-driver.svg');
+            }
+            }
 
-  computed: {
-    subTypes() {
-      const out: ProviderType[] = [];
-      const getters = this.$store.getters;
+            const providerType = {
+            id,
+            label,
+            description,
+            icon,
+            disabled
+            };
 
-      PROVIDER_TYPES?.forEach((provider) => {
-        addType(provider.id, provider.disabled);
-      });
+            out.push(providerType);
+        });
 
-      return out;
+        return out;
+    });
 
-      function addType(id: string, disabled = false) {
-        const label = getters['i18n/withFallback'](`cluster.provider."${ id }"`, null, id);
-        const description = getters['i18n/withFallback'](`cluster.providerDescription."${ id }"`, null, '');
-        let icon;
-
-        try {
-          icon = require(`~shell/assets/images/providers/${ id }.svg`);
-        } catch (e) {
-          try {
-            icon = require(`../../assets/images/providers/${ id }.svg`);
-          } catch (e) {
-            icon = require('~shell/assets/images/generic-driver.svg');
-          }
-        }
-
-        const providerType: ProviderType = {
-          id,
-          label,
-          description,
-          icon,
-          disabled
-        };
-
-        out.push(providerType);
-      }
-    }
-  },
-
-  methods: {
-    set,
-    clickedType(obj: ProviderType) {
+    function clickedType(obj) {
       const id = obj.id;
 
-      this.$router?.applyQuery({ [SUB_TYPE]: id });
-      this.selectType(id);
-    },
+      router.applyQuery({ [SUB_TYPE]: id });
+      selectType(id);
+    };
 
-    selectType(type: string) {
-      this.subType = type;
-      this.$emit('set-subtype', this.$store.getters['i18n/withFallback'](`cluster.provider."${ type }"`, null, type));
-    },
-  },
-});
+</script>
+<script>
+  import { defineComponent } from "vue"; 
+  import CreateEditView from '@shell/mixins/create-edit-view';
+  export default defineComponent({
+    mixins: [CreateEditView],
+  });
 </script>
 
 <template>
-  <CruResource               
+    <CruResource               
     :mode="mode"
     :validation-passed="true"
     :selected-subtype="subType"
@@ -129,11 +96,10 @@ export default defineComponent({
     class="create-cluster"
     @finish="save"
     @cancel="done"
-    @select-type="selectType"
     @error="e=>errors = e"
   >
     <template #subtypes>
-      <div
+        <div
         class="mb-20"
         style="width: 100%;"
       >
@@ -153,7 +119,6 @@ export default defineComponent({
       :provider="subType"
       @update:value="set(value, $event.k, $event.val)"
     />
-
     <template
       v-if="subType"
       #form-footer
@@ -162,15 +127,3 @@ export default defineComponent({
     </template>
   </CruResource>
 </template>
-
-<style lang='scss'>
-  .grouped-type {
-    position: relative;
-  }
-
-  .rke-switch {
-    margin-top: -10px;
-    position: absolute;
-    right: 0;
-  }
-</style>
