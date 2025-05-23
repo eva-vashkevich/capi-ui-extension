@@ -247,7 +247,7 @@ export default {
     @cancel="done"
     @error="e=>errors=e"
   >
-  <div v-if="isCustom">
+    <div v-if="isCustom">
       <NameNsDescription
         :value="value"
         :mode="mode"
